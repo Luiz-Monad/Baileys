@@ -1,0 +1,13 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "npm",
+			"script": "example",
+			"group": "build",
+			"problemMatcher": [],
+			"label": "example",
+			"detail": "node --inspect -r ts-node/register Example/example.ts --use-pairing-code"
+		}
+	]
+}
