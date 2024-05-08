@@ -1,18 +1,20 @@
 import { Boom } from '@hapi/boom'
 import NodeCache from 'node-cache'
 import readline from 'readline'
-import makeWASocket, { AnyMessageContent, BinaryInfo, delay, DisconnectReason, encodeWAM, fetchLatestBaileysVersion, getAggregateVotesInPollMessage, makeCacheableSignalKeyStore, makeInMemoryStore, PHONENUMBER_MCC, proto, useMultiFileAuthState, WAMessageContent, WAMessageKey } from '../src'
+import makeWASocket, { AnyMessageContent, BinaryInfo, delay, delayCancellable, DisconnectReason, encodeWAM, fetchLatestBaileysVersion, getAggregateVotesInPollMessage, makeCacheableSignalKeyStore, makeInMemoryStore, PHONENUMBER_MCC, proto, useMultiFileAuthState, WAMessageContent, WAMessageKey } from '../src'
 import MAIN_LOGGER from '../src/Utils/logger'
 import open from 'open'
 import fs from 'fs'
+import { HttpsProxyAgent } from 'https-proxy-agent'
 
 const logger = MAIN_LOGGER.child({})
-logger.level = 'trace'
+logger.level = 'debug'
 
 const useStore = !process.argv.includes('--no-store')
 const doReplies = !process.argv.includes('--no-reply')
 const usePairingCode = process.argv.includes('--use-pairing-code')
 const useMobile = process.argv.includes('--mobile')
+const phoneNumber = process.argv.includes('--phone-number') ? process.argv[process.argv.indexOf('--phone-number') + 1] : null
 
 // external map to store retry counts of messages when decryption/encryption fails
 // keep this out of the socket itself, so as to prevent a message decryption/encryption loop across socket restarts
@@ -36,11 +38,12 @@ const startSock = async() => {
 	const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info')
 	// fetch latest version of WA Web
 	const { version, isLatest } = await fetchLatestBaileysVersion()
-	console.log(`using WA v${version.join('.')}, isLatest: ${isLatest}`)
+	logger.info(`using WA v${version.join('.')}, isLatest: ${isLatest}`)
 
 	const sock = makeWASocket({
 		version,
 		logger,
+		agent: new HttpsProxyAgent("http://127.0.0.1:8080"),
 		printQRInTerminal: !usePairingCode,
 		mobile: useMobile,
 		auth: {
@@ -65,9 +68,10 @@ const startSock = async() => {
 			throw new Error('Cannot use pairing code with mobile api')
 		}
 
-		const phoneNumber = await question('Please enter your mobile phone number:\n')
-		const code = await sock.requestPairingCode(phoneNumber)
-		console.log(`Pairing code: ${code}`)
+		if (phoneNumber) await delayCancellable(2000).delay
+		const phoneNumberQuestion = phoneNumber ?? await question('Please enter your mobile phone number:\n')
+		const code = await sock.requestPairingCode(phoneNumberQuestion)
+		logger.info(`Pairing code: ${code}`)
 	}
 
 	// If mobile was chosen, ask for the code
@@ -98,11 +102,11 @@ const startSock = async() => {
 			try {
 				const code = await question('Please enter the one time code:\n')
 				const response = await sock.register(code.replace(/["']/g, '').trim().toLowerCase())
-				console.log('Successfully registered your phone number.')
-				console.log(response)
+				logger.info('Successfully registered your phone number.')
+				logger.info(response)
 				rl.close()
 			} catch(error) {
-				console.error('Failed to register your phone number. Please try again.\n', error)
+				logger.error('Failed to register your phone number. Please try again.\n', error)
 				await askForOTP()
 			}
 		}
@@ -134,7 +138,7 @@ const startSock = async() => {
 				await sock.requestRegistrationCode(registration)
 				await enterCode()
 			} catch(error) {
-				console.error('Failed to request registration code. Please try again.\n', error)
+				logger.error('Failed to request registration code. Please try again.\n', error)
 
 				if(error?.reason === 'code_checkpoint') {
 					await enterCaptcha()
@@ -174,10 +178,11 @@ const startSock = async() => {
 					if((lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut) {
 						startSock()
 					} else {
-						console.log('Connection closed. You are logged out.')
+						logger.info('Connection closed. You are logged out.')
 					}
 				}
-				
+
+				logger.info('connection update', update)
 				// WARNING: THIS WILL SEND A WAM EXAMPLE AND THIS IS A ****CAPTURED MESSAGE.****
 				// DO NOT ACTUALLY ENABLE THIS UNLESS YOU MODIFIED THE FILE.JSON!!!!!
 				// THE ANALYTICS IN THE FILE ARE OLD. DO NOT USE THEM.
@@ -217,33 +222,33 @@ const startSock = async() => {
 			}
 
 			if(events['labels.association']) {
-				console.log(events['labels.association'])
+				logger.info(events['labels.association'])
 			}
 
 
 			if(events['labels.edit']) {
-				console.log(events['labels.edit'])
+				logger.info(events['labels.edit'])
 			}
 
 			if(events.call) {
-				console.log('recv call event', events.call)
+				logger.info('recv call event', events.call)
 			}
 
 			// history received
 			if(events['messaging-history.set']) {
 				const { chats, contacts, messages, isLatest } = events['messaging-history.set']
-				console.log(`recv ${chats.length} chats, ${contacts.length} contacts, ${messages.length} msgs (is latest: ${isLatest})`)
+				logger.info(`recv ${chats.length} chats, ${contacts.length} contacts, ${messages.length} msgs (is latest: ${isLatest})`)
 			}
 
 			// received a new message
 			if(events['messages.upsert']) {
 				const upsert = events['messages.upsert']
-				console.log('recv messages ', JSON.stringify(upsert, undefined, 2))
+				logger.info('recv messages ', JSON.stringify(upsert, undefined, 2))
 
 				if(upsert.type === 'notify') {
 					for(const msg of upsert.messages) {
 						if(!msg.key.fromMe && doReplies) {
-							console.log('replying to', msg.key.remoteJid)
+							logger.info('replying to', msg.key.remoteJid)
 							await sock!.readMessages([msg.key])
 							await sendMessageWTyping({ text: 'Hello there!' }, msg.key.remoteJid!)
 						}
@@ -253,7 +258,7 @@ const startSock = async() => {
 
 			// messages updated like status delivered, message deleted etc.
 			if(events['messages.update']) {
-				console.log(
+				logger.info(
 					JSON.stringify(events['messages.update'], undefined, 2)
 				)
 
@@ -261,7 +266,7 @@ const startSock = async() => {
 					if(update.pollUpdates) {
 						const pollCreation = await getMessage(key)
 						if(pollCreation) {
-							console.log(
+							logger.info(
 								'got poll update, aggregation: ',
 								getAggregateVotesInPollMessage({
 									message: pollCreation,
@@ -274,19 +279,19 @@ const startSock = async() => {
 			}
 
 			if(events['message-receipt.update']) {
-				console.log(events['message-receipt.update'])
+				logger.info(events['message-receipt.update'])
 			}
 
 			if(events['messages.reaction']) {
-				console.log(events['messages.reaction'])
+				logger.info(events['messages.reaction'])
 			}
 
 			if(events['presence.update']) {
-				console.log(events['presence.update'])
+				logger.info(events['presence.update'])
 			}
 
 			if(events['chats.update']) {
-				console.log(events['chats.update'])
+				logger.info(events['chats.update'])
 			}
 
 			if(events['contacts.update']) {
@@ -295,7 +300,7 @@ const startSock = async() => {
 						const newUrl = contact.imgUrl === null
 							? null
 							: await sock!.profilePictureUrl(contact.id!).catch(() => null)
-						console.log(
+						logger.info(
 							`contact ${contact.id} has a new profile pic: ${newUrl}`,
 						)
 					}
@@ -303,7 +308,7 @@ const startSock = async() => {
 			}
 
 			if(events['chats.delete']) {
-				console.log('chats deleted ', events['chats.delete'])
+				logger.info('chats deleted ', events['chats.delete'])
 			}
 		}
 	)
